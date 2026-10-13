@@ -11,6 +11,8 @@ import {
   recordDistribution,
   recordGauge,
   recordIncrement,
+  QueueJobs,
+  TraceBatchBackfillEventSchema,
   TraceBatchEventSchema,
   type QueueName,
   type TQueueJobTypes,
@@ -40,6 +42,7 @@ import { TopicMetrics } from "../features/topics/metrics";
 import { isRetryableClickhouseInsertError } from "../services/ClickhouseWriter";
 import { summarizeAssembledTrace } from "../features/topics/summarizeAssembledTrace";
 import { recordTraceBatchTranscript } from "../features/traceBatching/traceBatchTranscript";
+import { enqueueTraceBatchBackfill } from "../features/traceBatching/traceBatchBackfill";
 
 type TraceBatchObservation = Observation & { eventTimestamp: string };
 
@@ -236,6 +239,18 @@ export function recordTraceBatchActiveReads(): void {
 }
 
 export const traceBatchQueueProcessor: Processor<
+  TQueueJobTypes[QueueName.TraceBatch]
+> = async (job) => {
+  if (job.name === QueueJobs.TraceBatchBackfill) {
+    const backfill = TraceBatchBackfillEventSchema.parse(job.data);
+    return {
+      jobCount: await enqueueTraceBatchBackfill(backfill.payload.traces),
+    };
+  }
+  return processTraceBatch(job);
+};
+
+const processTraceBatch: Processor<
   TQueueJobTypes[QueueName.TraceBatch]
 > = async (job) => {
   const startedAt = performance.now();
