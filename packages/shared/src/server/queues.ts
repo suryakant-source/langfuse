@@ -440,6 +440,7 @@ export enum QueueJobs {
   Topics = "topics",
   TopicsEmbedding = "topics-embedding",
   TraceBatch = "trace-batch",
+  TraceBatchBackfill = "trace-batch-backfill",
   TraceUpsert = "trace-upsert",
   TraceDelete = "trace-delete",
   ProjectDelete = "project-delete",
@@ -527,6 +528,21 @@ export const TraceBatchEventSchema = z.object({
   ]),
 });
 
+/**
+ * Traces selected outside the readiness map. The worker packs them with the
+ * dispatcher's batching strategy and enqueues ordinary trace-batch jobs.
+ */
+export const TraceBatchBackfillEventSchema = z.object({
+  timestamp: z.coerce.date(),
+  id: z.string(),
+  name: z.literal(QueueJobs.TraceBatchBackfill),
+  payload: z
+    .object({
+      traces: z.array(TraceBatchTraceSchema).min(1).max(10_000),
+    })
+    .strict(),
+});
+
 export type TQueueJobTypes = {
   [QueueName.Topics]: {
     timestamp: Date;
@@ -547,7 +563,9 @@ export type TQueueJobTypes = {
     name: QueueJobs.TopicsEmbedding;
     payload: z.infer<typeof TopicEmbeddingBatchSchema>;
   };
-  [QueueName.TraceBatch]: z.infer<typeof TraceBatchEventSchema>;
+  [QueueName.TraceBatch]:
+    | z.infer<typeof TraceBatchEventSchema>
+    | z.infer<typeof TraceBatchBackfillEventSchema>;
   [QueueName.TraceUpsert]: {
     timestamp: Date;
     id: string;
