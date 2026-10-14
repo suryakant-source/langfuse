@@ -92,11 +92,6 @@ const EnvSchema = z.object({
 
   BATCH_EXPORT_PAGE_SIZE: z.coerce.number().positive().default(500),
   BATCH_EXPORT_ROW_LIMIT: z.coerce.number().positive().default(1_500_000),
-  BATCH_EXPORT_MAX_CONCURRENT_PER_PROJECT: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(1),
   BATCH_EXPORT_DOWNLOAD_LINK_EXPIRATION_HOURS: z.coerce
     .number()
     .positive()

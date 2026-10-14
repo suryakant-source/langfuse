@@ -1,6 +1,7 @@
 /* eslint-disable no-nested-ternary */
 import { pipeline, Transform } from "stream";
 import {
+  BATCH_EXPORT_ABANDONED_AFTER_MS,
   BatchExportFileFormat,
   BatchExportQuerySchema,
   BatchExportStatus,
@@ -51,40 +52,41 @@ const isCausedBy = (error: unknown, target: unknown): boolean => {
   return false;
 };
 
-// A PROCESSING export older than this is treated as abandoned (e.g. its worker
-// died) so it cannot block the project's queue forever.
-const STALE_PROCESSING_EXPORT_MS = 60 * 60 * 1000;
-
-export class BatchExportProjectBusyError extends Error {
-  constructor(projectId: string, batchExportId: string) {
+export class BatchExportUserBusyError extends Error {
+  constructor(batchExportId: string) {
     super(
-      `Project ${projectId} is at its concurrent batch export limit; deferring ${batchExportId}`,
+      `User already runs a batch export in this project; deferring ${batchExportId}`,
     );
-    this.name = "BatchExportProjectBusyError";
+    this.name = "BatchExportUserBusyError";
   }
 }
 
-// Marks the export PROCESSING unless the project already runs the maximum
-// number of exports. The advisory lock serializes claims across workers.
-export const claimProjectExportSlot = async ({
+// Marks the export PROCESSING unless the same user already runs another export
+// in the project. The advisory lock serializes claims across workers.
+export const claimExportSlot = async ({
   projectId,
+  userId,
   batchExportId,
 }: {
   projectId: string;
+  userId: string;
   batchExportId: string;
 }): Promise<boolean> =>
   prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`batch-export:${projectId}`}, 0))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`batch-export:${projectId}:${userId}`}, 0))`;
 
     const running = await tx.batchExport.count({
       where: {
         projectId,
+        userId,
         id: { not: batchExportId },
         status: BatchExportStatus.PROCESSING,
-        updatedAt: { gte: new Date(Date.now() - STALE_PROCESSING_EXPORT_MS) },
+        updatedAt: {
+          gte: new Date(Date.now() - BATCH_EXPORT_ABANDONED_AFTER_MS),
+        },
       },
     });
-    if (running >= env.BATCH_EXPORT_MAX_CONCURRENT_PER_PROJECT) return false;
+    if (running > 0) return false;
 
     await tx.batchExport.update({
       where: { id: batchExportId, projectId },
@@ -173,8 +175,14 @@ export const handleBatchExportJob = async (
     );
   }
 
-  if (!(await claimProjectExportSlot({ projectId, batchExportId }))) {
-    throw new BatchExportProjectBusyError(projectId, batchExportId);
+  if (
+    !(await claimExportSlot({
+      projectId,
+      userId: jobDetails.userId,
+      batchExportId,
+    }))
+  ) {
+    throw new BatchExportUserBusyError(batchExportId);
   }
 
   // Parse query from job

@@ -10,11 +10,11 @@ import { prisma } from "@langfuse/shared/src/db";
 import { traceException, logger } from "@langfuse/shared/src/server";
 import { QueueName, TQueueJobTypes } from "@langfuse/shared/src/server";
 import {
-  BatchExportProjectBusyError,
+  BatchExportUserBusyError,
   handleBatchExportJob,
 } from "../features/batchExport/handleBatchExportJob";
 
-const PROJECT_BUSY_RETRY_DELAY_MS = 30_000;
+const USER_BUSY_RETRY_DELAY_MS = 30_000;
 
 export const batchExportQueueProcessor = async (
   job: Job<TQueueJobTypes[QueueName.BatchExport]>,
@@ -27,12 +27,9 @@ export const batchExportQueueProcessor = async (
 
     return true;
   } catch (e) {
-    if (e instanceof BatchExportProjectBusyError) {
+    if (e instanceof BatchExportUserBusyError) {
       logger.info(`[BATCH EXPORT] ${e.message}`);
-      await job.moveToDelayed(
-        Date.now() + PROJECT_BUSY_RETRY_DELAY_MS,
-        job.token,
-      );
+      await job.moveToDelayed(Date.now() + USER_BUSY_RETRY_DELAY_MS, job.token);
       throw new DelayedError();
     }
     if (e instanceof LangfuseNotFoundError) {
