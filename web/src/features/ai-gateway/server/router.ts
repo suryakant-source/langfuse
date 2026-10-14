@@ -179,28 +179,19 @@ export const aiGatewayRouter = createTRPCRouter({
     }),
 
   updateConnectionModels: protectedOrganizationProcedure
-    .input(connectionInput.extend({ allowedModels: allowedModelsSchema }))
+    .input(
+      connectionInput.extend({
+        allowedModels: allowedModelsSchema,
+        expectedUpdatedAt: z.date(),
+      }),
+    )
     .mutation(async ({ input, ctx }) => {
       requireGatewayAdmin({ session: ctx.session, orgId: input.orgId });
       return new GatewayProviderService(ctx.prisma).updateAllowedModels({
         organizationId: input.orgId,
         id: input.id,
         allowedModels: input.allowedModels,
-        session: ctx.session,
-      });
-    }),
-
-  reorderConnections: protectedOrganizationProcedure
-    .input(
-      organizationInput.extend({
-        connectionIds: z.array(z.string()),
-      }),
-    )
-    .mutation(async ({ input, ctx }) => {
-      requireGatewayAdmin({ session: ctx.session, orgId: input.orgId });
-      return new GatewayProviderService(ctx.prisma).reorder({
-        organizationId: input.orgId,
-        connectionIds: input.connectionIds,
+        expectedUpdatedAt: input.expectedUpdatedAt,
         session: ctx.session,
       });
     }),

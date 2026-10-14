@@ -11,13 +11,14 @@ import {
 import { createBadgeListTableColumn } from "@/src/components/design-system/table/columns/createBadgeListTableColumn";
 import { createTextTableColumn } from "@/src/components/design-system/table/columns/createTextTableColumn";
 import { providerLabels } from "@/src/features/ai-gateway/constants/providerLabels";
-import { gatewayModelsFilterConfig } from "@/src/features/ai-gateway/constants/modelsFilterConfig";
 import type { ApiFormat } from "@/src/features/ai-gateway/components/GatewayModelsPage/aggregateModels";
 import type { GatewayProvider } from "@/src/features/ai-gateway/types/gatewayProvider";
 import type { LangfuseColumnDef } from "@/src/components/table/types";
 import type { GatewayModelRow } from "./fns/filterGatewayModels";
 
-export const gatewayModelsColumns: LangfuseColumnDef<GatewayModelRow>[] = [
+const TABLE_NAME = "gateway-models";
+
+const gatewayModelsColumns: LangfuseColumnDef<GatewayModelRow>[] = [
   createTextTableColumn<GatewayModelRow>({
     accessorKey: "id",
     header: "Model",
@@ -63,7 +64,7 @@ export function GatewayModelsTable({
   return (
     <>
       <Table
-        tableName={gatewayModelsFilterConfig.tableName}
+        tableName={TABLE_NAME}
         columns={gatewayModelsColumns}
         data={data}
         noResultsMessage={noResultsMessage}

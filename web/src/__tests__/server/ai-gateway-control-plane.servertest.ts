@@ -716,6 +716,7 @@ describe("AI gateway control plane", () => {
       orgId: org.id,
       id: connection.id,
       allowedModels: ["gpt-4o-mini"],
+      expectedUpdatedAt: connection.updatedAt,
     });
 
     await expect(
@@ -723,6 +724,16 @@ describe("AI gateway control plane", () => {
         fastHashedSecretKey,
         apiFormat: "openai.responses",
         model: "OpenAI:gpt-4o",
+      }),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: "model_not_allowed",
+    });
+    await expect(
+      authenticateRequest({
+        fastHashedSecretKey,
+        apiFormat: "openai.responses",
+        model: "gpt-4o",
       }),
     ).rejects.toMatchObject({
       status: 403,
@@ -767,12 +778,47 @@ describe("AI gateway control plane", () => {
       orgId: org.id,
       id: connection.id,
       allowedModels: null,
+      expectedUpdatedAt: listed.data[0]!.updatedAt,
     });
     const allowAll = await caller.aiGateway.getConnection({
       orgId: org.id,
       id: connection.id,
     });
     expect(allowAll.allowedModels).toBeNull();
+  });
+
+  it("rejects stale concurrent model allowlist updates", async () => {
+    const { caller, org } = await prepare();
+    const connection = await caller.aiGateway.createConnection({
+      orgId: org.id,
+      name: "OpenAI",
+      provider: "OPENAI",
+      credential: "sk-test-openai",
+    });
+
+    await caller.aiGateway.updateConnectionModels({
+      orgId: org.id,
+      id: connection.id,
+      allowedModels: ["gpt-4o"],
+      expectedUpdatedAt: connection.updatedAt,
+    });
+    await expect(
+      caller.aiGateway.updateConnectionModels({
+        orgId: org.id,
+        id: connection.id,
+        allowedModels: ["gpt-4o-mini"],
+        expectedUpdatedAt: connection.updatedAt,
+      }),
+    ).rejects.toThrow(
+      "Model access changed while this page was open. Reload and try again.",
+    );
+
+    await expect(
+      caller.aiGateway.getConnection({
+        orgId: org.id,
+        id: connection.id,
+      }),
+    ).resolves.toMatchObject({ allowedModels: ["gpt-4o"] });
   });
 
   it("requires connection names to be unique within an organization", async () => {
@@ -913,7 +959,40 @@ describe("AI gateway control plane", () => {
     ).toBe(1);
   });
 
-  it("keeps routing priorities contiguous through reorders and deletes", async () => {
+  it("keeps disabled connections disabled after model discovery auth failures", async () => {
+    const { caller, org } = await prepare();
+    const connection = await caller.aiGateway.createConnection({
+      orgId: org.id,
+      name: "Anthropic",
+      provider: "ANTHROPIC",
+      credential: "sk-ant-test",
+    });
+    await caller.aiGateway.updateConnection({
+      orgId: org.id,
+      id: connection.id,
+      status: "DISABLED",
+    });
+    const unauthorizedFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 401 }));
+
+    await new GatewayModelCatalogService(
+      prisma,
+      unauthorizedFetch,
+    ).refreshModels({
+      organizationId: org.id,
+      connectionId: connection.id,
+    });
+
+    await expect(
+      prisma.gatewayAiConnection.findUnique({
+        where: { id: connection.id },
+        select: { status: true },
+      }),
+    ).resolves.toEqual({ status: "DISABLED" });
+  });
+
+  it("orders connections by creation time", async () => {
     const { caller, org } = await prepare();
     const created = [];
     for (const name of ["first", "second", "third"]) {
@@ -926,71 +1005,34 @@ describe("AI gateway control plane", () => {
         }),
       );
     }
-    const priorities = async () =>
+    await Promise.all([
+      prisma.gatewayAiConnection.update({
+        where: { id: created[0].id },
+        data: { createdAt: new Date("2026-10-03T00:00:00.000Z") },
+      }),
+      prisma.gatewayAiConnection.update({
+        where: { id: created[1].id },
+        data: { createdAt: new Date("2026-10-01T00:00:00.000Z") },
+      }),
+      prisma.gatewayAiConnection.update({
+        where: { id: created[2].id },
+        data: { createdAt: new Date("2026-10-02T00:00:00.000Z") },
+      }),
+    ]);
+
+    const listNames = async () =>
       (
-        await prisma.gatewayAiConnection.findMany({
-          where: { organizationId: org.id },
-          select: { name: true, routingPriority: true },
-          orderBy: { routingPriority: "asc" },
+        await caller.aiGateway.listConnections({
+          orgId: org.id,
         })
-      ).map(({ name, routingPriority }) => [name, routingPriority]);
+      ).data.map(({ name }) => name);
+    await expect(listNames()).resolves.toEqual(["second", "third", "first"]);
 
-    expect(await priorities()).toEqual([
-      ["first", 0],
-      ["second", 1],
-      ["third", 2],
-    ]);
-
-    // Reversing every row would violate the unique (organization_id,
-    // routing_priority) index if the writes were applied in place.
-    await caller.aiGateway.reorderConnections({
-      orgId: org.id,
-      connectionIds: [...created].reverse().map(({ id }) => id),
-    });
-    expect(await priorities()).toEqual([
-      ["third", 0],
-      ["second", 1],
-      ["first", 2],
-    ]);
-
-    // Two reorders racing on one organization must serialize rather than
-    // deadlock on rows locked in opposite orders.
-    await expect(
-      Promise.all([
-        caller.aiGateway.reorderConnections({
-          orgId: org.id,
-          connectionIds: created.map(({ id }) => id),
-        }),
-        caller.aiGateway.reorderConnections({
-          orgId: org.id,
-          connectionIds: [...created].reverse().map(({ id }) => id),
-        }),
-      ]),
-    ).resolves.toHaveLength(2);
-    expect((await priorities()).map(([, priority]) => priority)).toEqual([
-      0, 1, 2,
-    ]);
-
-    // Deleting from the middle must close the gap it leaves behind.
     await caller.aiGateway.deleteConnection({
       orgId: org.id,
       id: created[1].id,
     });
-    expect((await priorities()).map(([, priority]) => priority)).toEqual([
-      0, 1,
-    ]);
-
-    await expect(
-      caller.aiGateway.reorderConnections({
-        orgId: org.id,
-        connectionIds: [created[0].id],
-      }),
-    ).rejects.toThrow(
-      "Reorder must contain every organization gateway connection exactly once",
-    );
-    expect((await priorities()).map(([, priority]) => priority)).toEqual([
-      0, 1,
-    ]);
+    await expect(listNames()).resolves.toEqual(["third", "first"]);
   });
 
   it("serves repeat resolves from cache and drops it when a connection changes", async () => {
