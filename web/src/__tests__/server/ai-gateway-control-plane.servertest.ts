@@ -244,6 +244,26 @@ describe("AI gateway control plane", () => {
     ).rejects.toThrow("active project in the organization");
   });
 
+  it.each([Role.MEMBER, Role.VIEWER])(
+    "allows %s to read models without granting gateway management",
+    async (role) => {
+      const { caller, org } = await prepare(role);
+
+      await expect(
+        caller.aiGateway.listModelConnections({ orgId: org.id }),
+      ).resolves.toEqual([]);
+      await expect(
+        caller.aiGateway.refreshModels({ orgId: org.id }),
+      ).resolves.toEqual([]);
+      await expect(
+        caller.aiGateway.listConnections({ orgId: org.id }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(
+        caller.aiGateway.getConfig({ orgId: org.id }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    },
+  );
+
   it("stores provider credentials encrypted and never returns them", async () => {
     const { caller, org } = await prepare();
     const credential = "sk-test-gateway-redaction";
@@ -269,6 +289,16 @@ describe("AI gateway control plane", () => {
     const listed = await caller.aiGateway.listConnections({ orgId: org.id });
     expect(listed.data[0]).not.toHaveProperty("encryptedCredential");
     expect(JSON.stringify(listed)).not.toContain(credential);
+    await expect(
+      caller.aiGateway.listModelConnections({ orgId: org.id }),
+    ).resolves.toEqual([
+      {
+        id: created.id,
+        name: "OpenAI primary",
+        provider: "OPENAI",
+        allowedModels: null,
+      },
+    ]);
 
     const stored = await prisma.gatewayAiConnection.findUniqueOrThrow({
       where: { id: created.id },
@@ -1124,6 +1154,54 @@ describe("AI gateway control plane", () => {
     lookup.mockRestore();
   });
 
+  it("enforces gateway:invoke when API key role enforcement is on", async () => {
+    const originalMigration = env.API_AUTH_MIGRATION;
+    const originalCache = env.LANGFUSE_AI_GATEWAY_CACHE_RESOLVE_ENABLED;
+    Object.assign(env, { LANGFUSE_AI_GATEWAY_CACHE_RESOLVE_ENABLED: "false" });
+    try {
+      const { caller, org } = await prepare();
+      const gatewayKey = await caller.aiGateway.createApiKey({
+        orgId: org.id,
+        metadata: {},
+      });
+      const authenticator = new GatewayApiKeyAuthenticator(prisma);
+      const request = {
+        fastHashedSecretKey: createShaHash(gatewayKey.secretKey, env.SALT),
+        apiFormat: "openai.responses" as const,
+      };
+
+      Object.assign(env, { API_AUTH_MIGRATION: "enforce" });
+      await expect(
+        authenticator.authenticateModelsRequest(request),
+      ).resolves.toMatchObject({
+        organizationId: org.id,
+      });
+
+      await prisma.roleAssignment.updateMany({
+        where: { apiKeyId: gatewayKey.id },
+        data: { systemRole: "INGEST", roleId: "system/INGEST" },
+      });
+      await expect(
+        authenticator.authenticateModelsRequest(request),
+      ).rejects.toMatchObject({
+        status: 403,
+        message: "API key is not allowed to invoke the gateway",
+      });
+
+      Object.assign(env, { API_AUTH_MIGRATION: "legacy" });
+      await expect(
+        authenticator.authenticateModelsRequest(request),
+      ).resolves.toMatchObject({
+        organizationId: org.id,
+      });
+    } finally {
+      Object.assign(env, {
+        API_AUTH_MIGRATION: originalMigration,
+        LANGFUSE_AI_GATEWAY_CACHE_RESOLVE_ENABLED: originalCache,
+      });
+    }
+  });
+
   it("blocks deletion of the default ingestion project", async () => {
     const { caller, org, project } = await prepare();
     await caller.aiGateway.updateConfig({
@@ -1339,12 +1417,14 @@ describe("AI gateway control plane", () => {
     });
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(null, { status: 500 }))
-      .mockResolvedValue(
-        Response.json({
-          data: [{ id: "available-model", created: 10 }],
-        }),
-      );
+      .mockImplementation(async (_, init) => {
+        const authorization = new Headers(init?.headers).get("authorization");
+        return authorization === "Bearer sk-openai"
+          ? new Response(null, { status: 500 })
+          : Response.json({
+              data: [{ id: "available-model", created: 10 }],
+            });
+      });
 
     const context = await new GatewayApiKeyAuthenticator(
       prisma,
