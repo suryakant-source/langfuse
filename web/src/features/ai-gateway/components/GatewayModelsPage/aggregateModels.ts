@@ -29,7 +29,7 @@ export function aggregateModels(
   const resultsByConnectionId = new Map(
     results.map((result) => [result.connectionId, result]),
   );
-  const models = new Map<string, ModelRow>();
+  const models: ModelRow[] = [];
   const seenConnectionIds = new Set<string>();
 
   for (const connection of connections) {
@@ -52,5 +52,5 @@ export function aggregateModels(
     }
   }
 
-  return [...models.values()];
+  return models;
 }
