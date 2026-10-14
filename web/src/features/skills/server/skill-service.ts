@@ -248,9 +248,6 @@ export class SkillService {
       return skill.id;
     });
 
-    await this.skillCacheService.invalidateCache({
-      projectId: params.projectId,
-    });
     return this.getById({ projectId: params.projectId, skillId });
   }
 
@@ -581,7 +578,7 @@ export class SkillService {
     actor: SkillActor;
   }): Promise<void> {
     const where = { projectId: params.projectId, name: params.name };
-    await this.prisma.$transaction(async (tx) => {
+    const versions = await this.prisma.$transaction(async (tx) => {
       await this.lockSkill(tx, params.projectId, params.name);
       const versions = await tx.skill.findMany({
         where,
@@ -612,9 +609,11 @@ export class SkillService {
         tx,
       );
       await tx.skill.deleteMany({ where });
+      return versions.map(({ version }) => ({ name: params.name, version }));
     });
     await this.skillCacheService.invalidateCache({
       projectId: params.projectId,
+      versions,
     });
   }
 
@@ -687,6 +686,7 @@ export class SkillService {
     });
     await this.skillCacheService.invalidateCache({
       projectId: params.projectId,
+      versions: [{ name: params.name, version: params.version }],
     });
   }
 
